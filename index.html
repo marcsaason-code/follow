@@ -571,12 +571,19 @@ footer.tab-info{text-align:center; font-size:0.75rem; opacity:0.4; padding:20px 
 </div><!-- /admin-root -->
 
 
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
 <script>
+/* ============================================================
+   FOLLOW — conectado ao Supabase
+   Preencha as duas linhas abaixo com os dados do seu projeto
+   (Project Settings → API, no painel do Supabase).
+   ============================================================ */
+const SUPABASE_URL = 'https://gcfizjimktzdwzbpbdhp.supabase.co';
+const SUPABASE_ANON_KEY = 'sb_publishable_qFMy39LT_3d0uENzWyETNQ_8FrtW-gu';
+const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
 function isoLocal(d){return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');}
-let STORAGE_KEY = 'follow_clients_v1';
-let TMPL_KEY = 'follow_templates_v1';
-let SETTINGS_KEY = 'follow_settings_v1';
-let SEEN_KEY = 'follow_banner_seen_v1';
+function todayStr(){ return isoLocal(new Date()); }
 
 const DEFAULT_TEMPLATES = {
   'orc-env': 'Oi {nome}! Passando pra confirmar se o orçamento de {valor} chegou certinho aí. Qualquer dúvida, me chama 🙂',
@@ -594,33 +601,71 @@ let settings = {
   retorno3: 10,
   cancelarAoMudar: true
 };
-let sentToday = {}; // {clientId: 'YYYY-MM-DD'}
+let sentToday = {}; // {clientId: 'YYYY-MM-DD'} — só neste navegador, não precisa ir pro banco
 
-function loadTemplates(){
-  try{
-    const raw = localStorage.getItem(TMPL_KEY);
-    templates = raw ? {...DEFAULT_TEMPLATES, ...JSON.parse(raw)} : {...DEFAULT_TEMPLATES};
-  }catch(e){ templates = {...DEFAULT_TEMPLATES}; }
+/* ---------- BANCO: mapeamento client <-> linha do Supabase ---------- */
+function dbToClient(r){
+  return { id:r.id, nome:r.nome, telefone:r.telefone, empresa:r.empresa, valor:r.valor,
+    origem:r.origem, situacao:r.situacao, proxData:r.prox_data, proxMotivo:r.prox_motivo,
+    retornoBase:r.retorno_base, retornoStage:r.retorno_stage };
 }
-function saveTemplates(){ try{ localStorage.setItem(TMPL_KEY, JSON.stringify(templates)); }catch(e){} }
+function clientToDb(c){
+  return { nome:c.nome, telefone:c.telefone||null, empresa:c.empresa||null, valor:c.valor||0,
+    origem:c.origem||null, situacao:c.situacao, prox_data:c.proxData||null, prox_motivo:c.proxMotivo||null,
+    retorno_base:c.retornoBase||null, retorno_stage:c.retornoStage||0 };
+}
 
-function loadSettings(){
-  try{
-    const raw = localStorage.getItem(SETTINGS_KEY);
-    if(raw) settings = {...settings, ...JSON.parse(raw)};
-  }catch(e){}
+let currentTenantId = null;
+
+async function loadClients(){
+  const { data, error } = await sb.from('clients').select('*').eq('tenant_id', currentTenantId);
+  clients = error ? [] : data.map(dbToClient);
+  if(error) console.error('loadClients', error);
 }
-function saveSettings(){ try{ localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); }catch(e){} }
+async function dbInsertClient(c){
+  const row = {...clientToDb(c), tenant_id: currentTenantId};
+  const { data, error } = await sb.from('clients').insert(row).select().single();
+  if(error){ alert('Não foi possível salvar: '+error.message); return null; }
+  return dbToClient(data);
+}
+async function dbUpdateClient(id, c){
+  const { data, error } = await sb.from('clients').update(clientToDb(c)).eq('id', id).select().single();
+  if(error){ alert('Não foi possível salvar: '+error.message); return null; }
+  return dbToClient(data);
+}
+async function dbDeleteClient(id){
+  const { error } = await sb.from('clients').delete().eq('id', id);
+  if(error) alert('Não foi possível excluir: '+error.message);
+  return !error;
+}
+
+async function loadTenantSettings(){
+  const { data, error } = await sb.from('tenant_settings').select('*').eq('tenant_id', currentTenantId).single();
+  if(error || !data) return;
+  settings = {
+    scheduleTime: data.schedule_time, dias: data.dias_envio, autoRetorno: data.auto_retorno,
+    retorno1: data.retorno1, retorno2: data.retorno2, retorno3: data.retorno3,
+    cancelarAoMudar: data.cancelar_ao_mudar
+  };
+  templates = {...DEFAULT_TEMPLATES, ...(data.templates||{})};
+}
+async function saveSettings(){
+  await sb.from('tenant_settings').update({
+    schedule_time: settings.scheduleTime, dias_envio: settings.dias, auto_retorno: settings.autoRetorno,
+    retorno1: settings.retorno1, retorno2: settings.retorno2, retorno3: settings.retorno3,
+    cancelar_ao_mudar: settings.cancelarAoMudar
+  }).eq('tenant_id', currentTenantId);
+}
+async function saveTemplates(){
+  await sb.from('tenant_settings').update({ templates }).eq('tenant_id', currentTenantId);
+}
 
 function loadSentToday(){
-  try{
-    const raw = localStorage.getItem(SEEN_KEY+'_sent');
-    sentToday = raw ? JSON.parse(raw) : {};
-  }catch(e){ sentToday = {}; }
+  try{ sentToday = JSON.parse(localStorage.getItem('follow_sent_'+currentTenantId)||'{}'); }catch(e){ sentToday = {}; }
 }
-function saveSentToday(){ try{ localStorage.setItem(SEEN_KEY+'_sent', JSON.stringify(sentToday)); }catch(e){} }
-
-function todayStr(){ return isoLocal(new Date()); }
+function saveSentToday(){
+  try{ localStorage.setItem('follow_sent_'+currentTenantId, JSON.stringify(sentToday)); }catch(e){}
+}
 
 function fillMessage(tmpl, c){
   return tmpl
@@ -641,33 +686,6 @@ const FUNNEL_STAGES = ['novo','orc-env','aguard','negoc','fechado'];
 const FUNNEL_LABEL = {'novo':'Novo','orc-env':'Orçamento','aguard':'Aguardando','negoc':'Negociação','fechado':'Fechado'};
 
 let clients = [];
-
-let tenantDemo = false;
-function seed(){
-  const today = new Date();
-  const d = (offset)=>{ const x=new Date(today); x.setDate(x.getDate()+offset); return isoLocal(x); };
-  return [
-    {id:cid(), nome:'João Pereira', telefone:'11991234567', empresa:'', valor:2800, origem:'Instagram', situacao:'aguard', proxData:d(-2), proxMotivo:'Retornar orçamento'},
-    {id:cid(), nome:'Marcela Duarte', telefone:'11987654321', empresa:'Duarte Reformas', valor:15400, origem:'Indicação', situacao:'negoc', proxData:d(0), proxMotivo:'Fechar condições de pagamento'},
-    {id:cid(), nome:'Rafael Costa', telefone:'11998765432', empresa:'', valor:900, origem:'Google', situacao:'orc-env', proxData:d(0), proxMotivo:'Confirmar recebimento'},
-    {id:cid(), nome:'Studio Vidraçaria Luz', telefone:'11992223344', empresa:'', valor:6300, origem:'Site', situacao:'orc-sol', proxData:d(1), proxMotivo:'Enviar orçamento'},
-    {id:cid(), nome:'Patrícia Nogueira', telefone:'11993334455', empresa:'Nogueira Contabilidade', valor:1200, origem:'Indicação', situacao:'aguard', proxData:d(-6), proxMotivo:'Retornar orçamento'},
-    {id:cid(), nome:'Eduardo Lima', telefone:'11994445566', empresa:'', valor:4200, origem:'Facebook', situacao:'perdido', proxData:d(-40), proxMotivo:'Reativar — sem contato há 40 dias'},
-    {id:cid(), nome:'Camila Rocha', telefone:'11995556677', empresa:'Rocha Ar Condicionado', valor:3100, origem:'Indicação', situacao:'fechado', proxData:d(20), proxMotivo:'Pós-venda / satisfação'},
-  ];
-}
-function cid(){ return 'c_' + Math.random().toString(36).slice(2,10); }
-
-function load(){
-  try{
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if(raw){ clients = JSON.parse(raw); }
-    else { clients = tenantDemo ? seed() : []; save(); }
-  }catch(e){ clients = tenantDemo ? seed() : []; }
-}
-function save(){
-  try{ localStorage.setItem(STORAGE_KEY, JSON.stringify(clients)); }catch(e){}
-}
 
 function daysDiff(dateStr){
   const today = new Date(); today.setHours(0,0,0,0);
@@ -704,11 +722,7 @@ function renderDash(){
   const orcEnv = clients.filter(c=>['orc-env','aguard'].includes(c.situacao)).length;
   document.getElementById('s-orcenv').textContent = orcEnv;
 
-  const now = new Date();
-  const fechadosMes = clients.filter(c=>{
-    if(c.situacao!=='fechado') return false;
-    return true;
-  }).length;
+  const fechadosMes = clients.filter(c=>c.situacao==='fechado').length;
   document.getElementById('s-fechados').textContent = fechadosMes;
 
   document.getElementById('stat-retornos').onclick = ()=> filterAndShow('hoje');
@@ -716,7 +730,6 @@ function renderDash(){
   document.getElementById('stat-orcenv').onclick = ()=> filterAndShow('enviados');
   document.getElementById('stat-fechados').onclick = ()=> filterAndShow('fechados');
 
-  // attention list
   const atrasados = active.filter(c=>c.proxData && daysDiff(c.proxData) < 0)
     .sort((a,b)=>daysDiff(a.proxData)-daysDiff(b.proxData));
   const hoje = active.filter(c=>c.proxData && daysDiff(c.proxData) === 0);
@@ -743,7 +756,6 @@ function renderDash(){
     });
   }
 
-  // funnel
   const funnel = document.getElementById('funnel');
   funnel.innerHTML='';
   FUNNEL_STAGES.forEach(stage=>{
@@ -780,7 +792,7 @@ document.getElementById('cfg-auto-retorno').addEventListener('change', (e)=>{
   document.getElementById('cfg-steps').style.opacity = e.target.checked ? '1' : '0.4';
 });
 
-document.getElementById('cfg-save').onclick = ()=>{
+document.getElementById('cfg-save').onclick = async ()=>{
   settings.scheduleTime = document.getElementById('cfg-schedule-time').value || '09:00';
   settings.dias = Array.from(document.querySelectorAll('#dow-row button.on')).map(b=>b.dataset.d);
   settings.autoRetorno = document.getElementById('cfg-auto-retorno').checked;
@@ -788,13 +800,12 @@ document.getElementById('cfg-save').onclick = ()=>{
   settings.retorno2 = Number(document.getElementById('cfg-r2').value)||5;
   settings.retorno3 = Number(document.getElementById('cfg-r3').value)||10;
   settings.cancelarAoMudar = document.getElementById('cfg-cancelar').checked;
-  saveSettings();
+  await saveSettings();
   document.getElementById('cfg-saved-msg').classList.add('show');
   setTimeout(()=> document.getElementById('cfg-saved-msg').classList.remove('show'), 2200);
   checkBanner();
 };
 
-/* Calcula data futura pulando pra próximo dia de envio configurado */
 function addDaysSkippingOff(baseDateStr, days){
   const DOW = ['dom','seg','ter','qua','qui','sex','sab'];
   let d = new Date(baseDateStr+'T00:00:00');
@@ -806,7 +817,6 @@ function addDaysSkippingOff(baseDateStr, days){
   return isoLocal(d);
 }
 
-/* Aplica regra de retorno automático ao salvar um cliente */
 function applyAutoRetorno(data, previous){
   if(!settings.autoRetorno) return data;
   const virouEnviado = data.situacao==='orc-env' && (!previous || previous.situacao!=='orc-env');
@@ -819,25 +829,25 @@ function applyAutoRetorno(data, previous){
   }
   if(settings.cancelarAoMudar && previous && previous.situacao!==data.situacao &&
      ['negoc','fechado','perdido'].includes(data.situacao)){
-    // cliente avançou de etapa: cancela a cadência automática (mantém o próximo contato manual se já existir)
     data.retornoStage = 0;
   }
   return data;
 }
 
-/* Avança para o próximo retorno da cadência (chamado ao marcar como enviado no Disparo) */
 function advanceRetorno(c){
-  if(!settings.autoRetorno || !c.retornoBase || !c.retornoStage) return;
+  if(!settings.autoRetorno || !c.retornoBase || !c.retornoStage) return false;
   if(c.retornoStage===1){
     c.proxData = addDaysSkippingOff(c.retornoBase, settings.retorno2);
     c.proxMotivo = 'Retornar orçamento (2º contato automático)';
     c.retornoStage = 2;
+    return true;
   } else if(c.retornoStage===2){
     c.proxData = addDaysSkippingOff(c.retornoBase, settings.retorno3);
     c.proxMotivo = 'Retornar orçamento (3º e último contato automático)';
     c.retornoStage = 3;
+    return true;
   }
-  // stage 3: última cadência automática, não agenda mais sozinho
+  return false;
 }
 function filterAndShow(type){
   pendingFilter = type;
@@ -849,7 +859,7 @@ function dueForDisparo(){
   return clients.filter(c=>{
     if(c.situacao==='fechado' || c.situacao==='perdido') return false;
     if(!c.proxData) return false;
-    return daysDiff(c.proxData) <= 0; // hoje ou atrasado
+    return daysDiff(c.proxData) <= 0;
   }).sort((a,b)=>daysDiff(a.proxData)-daysDiff(b.proxData));
 }
 
@@ -888,24 +898,19 @@ function renderDisparo(){
         <button class="btn small" data-act="send">Enviar pelo WhatsApp</button>
       </div>
     `;
+    async function markSent(){
+      sentToday[c.id] = todayStr();
+      saveSentToday();
+      if(advanceRetorno(c)) await dbUpdateClient(c.id, c);
+      renderDisparo();
+      renderDash();
+    }
     card.querySelector('[data-act="send"]').onclick = ()=>{
       const text = card.querySelector('textarea').value;
       window.open('https://wa.me/55'+(c.telefone||'').replace(/\D/g,'')+'?text='+encodeURIComponent(text), '_blank');
-      sentToday[c.id] = todayStr();
-      saveSentToday();
-      advanceRetorno(c);
-      save();
-      renderDisparo();
-      renderDash();
+      markSent();
     };
-    card.querySelector('[data-act="skip"]').onclick = ()=>{
-      sentToday[c.id] = todayStr();
-      saveSentToday();
-      advanceRetorno(c);
-      save();
-      renderDisparo();
-      renderDash();
-    };
+    card.querySelector('[data-act="skip"]').onclick = markSent;
     list.appendChild(card);
   });
 }
@@ -928,13 +933,12 @@ function checkBanner(){
   }
 }
 
-document.getElementById('schedule-time').addEventListener('change', (e)=>{
+document.getElementById('schedule-time').addEventListener('change', async (e)=>{
   settings.scheduleTime = e.target.value;
-  saveSettings();
+  await saveSettings();
   checkBanner();
 });
 
-/* templates modal */
 const overlayTmpl = document.getElementById('overlay-tmpl');
 document.getElementById('btn-templates').onclick = ()=>{
   document.getElementById('t-orc-env').value = templates['orc-env'];
@@ -945,12 +949,12 @@ document.getElementById('btn-templates').onclick = ()=>{
 };
 document.getElementById('btn-tmpl-cancel').onclick = ()=> overlayTmpl.classList.remove('show');
 overlayTmpl.onclick = (e)=>{ if(e.target===overlayTmpl) overlayTmpl.classList.remove('show'); };
-document.getElementById('btn-tmpl-save').onclick = ()=>{
+document.getElementById('btn-tmpl-save').onclick = async ()=>{
   templates['orc-env'] = document.getElementById('t-orc-env').value;
   templates['aguard'] = document.getElementById('t-aguard').value;
   templates['negoc'] = document.getElementById('t-negoc').value;
   templates['reativ'] = document.getElementById('t-reativ').value;
-  saveTemplates();
+  await saveTemplates();
   overlayTmpl.classList.remove('show');
   renderDisparo();
 };
@@ -1032,6 +1036,7 @@ function renderList(){
 function escapeHtml(s){ return (s||'').replace(/[&<>"']/g, m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); }
 
 /* ---------- VIEW SWITCH ---------- */
+let pendingFilter = null;
 function switchView(view){
   document.getElementById('view-dash').style.display = view==='dash' ? '' : 'none';
   document.getElementById('view-list').style.display = view==='list' ? '' : 'none';
@@ -1045,12 +1050,90 @@ function switchView(view){
   if(view==='disparo'){ renderDisparo(); }
   if(view==='config'){ renderConfig(); }
 }
+document.querySelectorAll('#app-root nav.tabs button').forEach(b=>{
+  b.onclick = ()=> switchView(b.dataset.view);
+});
+document.getElementById('search').oninput = renderList;
+document.getElementById('filter-status').onchange = ()=>{ pendingFilter=null; renderList(); };
 
-/* ---------- SESSÃO / LOGIN ---------- */
-const SESSION_KEY='follow_session_v1';
-const ADMIN_KEY='follow_admin_v1';
-let sessionRole=null, A=null;
-const SETTINGS_DEFAULT = JSON.parse(JSON.stringify(settings));
+/* ---------- MODAL cliente ---------- */
+const overlay = document.getElementById('overlay');
+function openModal(client){
+  document.getElementById('modal-title').textContent = client ? 'Editar cliente' : 'Novo cliente';
+  document.getElementById('f-id').value = client ? client.id : '';
+  document.getElementById('f-nome').value = client ? client.nome : '';
+  document.getElementById('f-telefone').value = client ? client.telefone : '';
+  document.getElementById('f-empresa').value = client ? client.empresa : '';
+  document.getElementById('f-valor').value = client ? client.valor : '';
+  document.getElementById('f-origem').value = client ? client.origem : '';
+  document.getElementById('f-situacao').value = client ? client.situacao : 'novo';
+  document.getElementById('f-prox-data').value = client ? client.proxData : '';
+  document.getElementById('f-prox-motivo').value = client ? client.proxMotivo : '';
+  document.getElementById('btn-delete').style.display = client ? '' : 'none';
+  overlay.classList.add('show');
+}
+function closeModal(){ overlay.classList.remove('show'); }
+document.getElementById('btn-new').onclick = ()=> openModal(null);
+document.getElementById('btn-cancel').onclick = closeModal;
+overlay.onclick = (e)=>{ if(e.target===overlay) closeModal(); };
+
+document.getElementById('btn-save').onclick = async ()=>{
+  const id = document.getElementById('f-id').value;
+  const nome = document.getElementById('f-nome').value.trim();
+  if(!nome){ alert('Informe o nome do cliente.'); return; }
+  let data = {
+    nome,
+    telefone: document.getElementById('f-telefone').value.trim(),
+    empresa: document.getElementById('f-empresa').value.trim(),
+    valor: Number(document.getElementById('f-valor').value)||0,
+    origem: document.getElementById('f-origem').value.trim(),
+    situacao: document.getElementById('f-situacao').value,
+    proxData: document.getElementById('f-prox-data').value,
+    proxMotivo: document.getElementById('f-prox-motivo').value.trim(),
+  };
+  const btn = document.getElementById('btn-save'); btn.disabled = true;
+  if(id){
+    const idx = clients.findIndex(c=>c.id===id);
+    const previous = clients[idx];
+    data = applyAutoRetorno({...previous, ...data}, previous);
+    const merged = {...previous, ...data};
+    const saved = await dbUpdateClient(id, merged);
+    if(saved) clients[idx] = saved;
+  } else {
+    data = applyAutoRetorno({...data, retornoStage:0}, null);
+    const saved = await dbInsertClient(data);
+    if(saved) clients.push(saved);
+  }
+  btn.disabled = false;
+  closeModal();
+  renderDash();
+  renderList();
+};
+
+document.getElementById('btn-delete').onclick = async ()=>{
+  const id = document.getElementById('f-id').value;
+  if(id && confirm('Excluir este cliente?')){
+    const ok = await dbDeleteClient(id);
+    if(ok) clients = clients.filter(c=>c.id!==id);
+    closeModal();
+    renderDash();
+    renderList();
+  }
+};
+
+function updateDisparoBadge(){
+  const due = dueForDisparo();
+  const pendentes = due.filter(c=> sentToday[c.id]!==todayStr());
+  const badge = document.getElementById('disparo-badge');
+  if(pendentes.length){ badge.textContent = pendentes.length; badge.style.display=''; }
+  else { badge.style.display='none'; }
+}
+
+/* ============================================================
+   SESSÃO / LOGIN — Supabase Auth
+   ============================================================ */
+let sessionRole = null;
+let currentUser = null;
 
 function showScreen(w){
   document.getElementById('login-screen').style.display = w==='login' ? 'flex' : 'none';
@@ -1058,66 +1141,22 @@ function showScreen(w){
   document.getElementById('admin-root').style.display = w==='admin' ? '' : 'none';
 }
 function loginError(msg){ const e=document.getElementById('login-error'); e.textContent=msg; e.style.display=msg?'block':'none'; }
-function setSession(o){ try{ if(o) localStorage.setItem(SESSION_KEY,JSON.stringify(o)); else localStorage.removeItem(SESSION_KEY);}catch(e){} }
+function setLoading(is){ const b=document.getElementById('login-submit'); b.disabled=is; b.textContent = is ? 'Entrando…' : 'Entrar'; }
 
-function bootTenant(acc){
-  sessionRole='tenant';
-  const k=acc.id;
-  STORAGE_KEY='follow_clients_v1_'+k; TMPL_KEY='follow_templates_v1_'+k; SETTINGS_KEY='follow_settings_v1_'+k; SEEN_KEY='follow_banner_seen_v1_'+k;
-  tenantDemo=!!acc.demo; pendingFilter=null;
-  settings=JSON.parse(JSON.stringify(SETTINGS_DEFAULT));
-  load(); loadTemplates(); loadSettings(); loadSentToday();
-  document.getElementById('tenant-foot').innerHTML='<b style="color:#c9cbd1">'+escapeHtml(acc.empresa)+'</b><br>Follow — controle de orçamentos e clientes.';
-  showScreen('app'); switchView('dash'); updateDisparoBadge(); checkBanner();
-}
-function bootAdmin(){
-  sessionRole='admin'; aLoad();
-  document.getElementById('admin-logo').src=document.querySelector('#app-root .brand img').src;
-  showScreen('admin'); aSwitch('assinantes');
-}
-function bootFromSession(){
-  aLoad(); let ss=null;
-  try{ ss=JSON.parse(localStorage.getItem(SESSION_KEY)||'null'); }catch(e){}
-  if(ss && ss.role==='admin'){ bootAdmin(); return; }
-  if(ss && ss.role==='tenant'){
-    const acc=A.accounts.find(x=>x.id===ss.id);
-    if(acc){ const ac=aAccess(acc); if(ac.ok){ bootTenant(acc); return; } loginError(ac.reason); }
-  }
-  setSession(null); showScreen('login');
-}
-function doLogin(){
-  const email=document.getElementById('login-email').value.trim().toLowerCase();
-  const pass=document.getElementById('login-password').value;
-  if(!email||!pass){ loginError('Preencha e-mail e senha.'); return; }
-  aLoad();
-  if(email===A.admin.email.toLowerCase() && pass===A.admin.pass){ loginError(''); setSession({role:'admin'}); bootAdmin(); return; }
-  const acc=A.accounts.find(x=>x.email.toLowerCase()===email && x.senha===pass);
-  if(!acc){ loginError('E-mail ou senha inválidos.'); return; }
-  const ac=aAccess(acc); if(!ac.ok){ loginError(ac.reason); return; }
-  loginError(''); setSession({role:'tenant',id:acc.id}); bootTenant(acc);
-}
-function doLogout(){ setSession(null); sessionRole=null; document.getElementById('login-password').value=''; loginError(''); showScreen('login'); }
-document.getElementById('login-submit').onclick=doLogin;
-['login-email','login-password'].forEach(id=>document.getElementById(id).addEventListener('keydown',e=>{ if(e.key==='Enter') doLogin(); }));
-document.getElementById('logout-btn').onclick=doLogout;
-document.getElementById('admin-logout').onclick=doLogout;
-
-/* ---------- ADMIN: assinaturas ---------- */
+/* datas / financeiro (mesma lógica usada no protótipo, agora alimentada pelo banco) */
 function addDaysIso(s,n){ const p=s.split('-').map(Number); return isoLocal(new Date(p[0],p[1]-1,p[2]+n)); }
 function addMonthsIso(s,n){ const p=s.split('-').map(Number); const f=new Date(p[0],p[1]-1+n,1); const dim=new Date(f.getFullYear(),f.getMonth()+1,0).getDate(); return isoLocal(new Date(f.getFullYear(),f.getMonth(),Math.min(p[2],dim))); }
 function daysBetweenIso(a,b){ const x=a.split('-').map(Number), y=b.split('-').map(Number); return Math.round((new Date(y[0],y[1]-1,y[2])-new Date(x[0],x[1]-1,x[2]))/86400000); }
 function fmtFull(s){ if(!s) return '—'; const p=s.split('-'); return p[2]+'/'+p[1]+'/'+p[0]; }
 function fmtBRL(v){ return 'R$ '+Number(v||0).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2}); }
-function aSave(){ try{ localStorage.setItem(ADMIN_KEY,JSON.stringify(A)); }catch(e){} }
-function aSeed(){
-  const t=todayStr(); const d=n=>addDaysIso(t,-n);
-  return {admin:{email:'admin@follow.app',pass:'admin123'}, cfg:{valorPadrao:99,tolerancia:5}, accounts:[
-    {id:'demo1',empresa:'Móveis Silva Planejados',nome:'Carlos Silva',email:'carlos@moveissilva.com',senha:'demo123',valor:99,criado:d(70),anchor:d(70),status:'ativo',pausedAt:null,cancelledAt:null,pagos:{0:d(69)},demo:true},
-    {id:'demo2',empresa:'Solar Norte Energia',nome:'Ana Prado',email:'ana@solarnorte.com',senha:'demo123',valor:149,criado:d(12),anchor:d(12),status:'ativo',pausedAt:null,cancelledAt:null,pagos:{0:d(12)},demo:false},
-    {id:'demo3',empresa:'Clínica Vida',nome:'Dr. Paulo',email:'paulo@clinicavida.com',senha:'demo123',valor:99,criado:d(45),anchor:d(45),status:'pausado',pausedAt:d(5),cancelledAt:null,pagos:{0:d(44),1:d(14)},demo:false}
-  ]};
+
+function tenantRowToAccount(t, payments){
+  const pagos = {};
+  payments.filter(p=>p.tenant_id===t.id).forEach(p=> pagos[p.ciclo] = p.pago_em);
+  return { id:t.id, empresa:t.empresa, nome:t.nome_responsavel, email:t.email, valor:t.valor_mensal,
+    criado:t.criado_em, anchor:t.ancora, status:t.status, pausedAt:t.pausado_em, cancelledAt:t.cancelado_em,
+    authUserId:t.auth_user_id, pagos };
 }
-function aLoad(){ try{ const r=localStorage.getItem(ADMIN_KEY); A=r?JSON.parse(r):null; }catch(e){ A=null; } if(!A){ A=aSeed(); aSave(); } }
 function aCycles(a){
   const t=todayStr(); const ref=a.status==='cancelado'?a.cancelledAt:(a.status==='pausado'?a.pausedAt:t);
   const out=[]; let n=0;
@@ -1139,7 +1178,73 @@ function aAccess(a){
   const f=aFinance(a); if(f.state==='late' && f.daysLate>A.cfg.tolerancia) return {ok:false,reason:'Acesso bloqueado por pagamento em atraso. Regularize para voltar a usar.'};
   return {ok:true};
 }
-let aFilterState='';
+
+async function bootTenant(acc){
+  sessionRole='tenant'; currentTenantId=acc.id; pendingFilter=null;
+  await loadClients(); await loadTenantSettings(); loadSentToday();
+  document.getElementById('tenant-foot').innerHTML='<b style="color:#c9cbd1">'+escapeHtml(acc.empresa)+'</b><br>Follow — controle de orçamentos e clientes.';
+  showScreen('app'); switchView('dash'); updateDisparoBadge(); checkBanner();
+}
+async function bootAdmin(){
+  sessionRole='admin';
+  document.getElementById('admin-logo').src=document.querySelector('#app-root .brand img').src;
+  await aLoadFromDb();
+  showScreen('admin'); aSwitch('assinantes');
+}
+
+async function doLogin(){
+  const email=document.getElementById('login-email').value.trim();
+  const pass=document.getElementById('login-password').value;
+  if(!email||!pass){ loginError('Preencha e-mail e senha.'); return; }
+  setLoading(true); loginError('');
+  const { data, error } = await sb.auth.signInWithPassword({ email, password: pass });
+  if(error){ setLoading(false); loginError('E-mail ou senha inválidos.'); return; }
+  await resolveSession(data.user);
+  setLoading(false);
+}
+async function resolveSession(user){
+  currentUser = user;
+  const { data: adminRow } = await sb.from('app_admins').select('auth_user_id').eq('auth_user_id', user.id).maybeSingle();
+  if(adminRow){ await bootAdmin(); return; }
+
+  const { data: tenantRow } = await sb.from('tenants').select('*').eq('auth_user_id', user.id).maybeSingle();
+  if(!tenantRow){ loginError('Este login não está associado a nenhuma conta.'); await sb.auth.signOut(); return; }
+
+  const { data: payRows } = await sb.from('tenant_payments').select('*').eq('tenant_id', tenantRow.id);
+  const { data: cfgRow } = await sb.from('app_config').select('*').maybeSingle();
+  A.cfg = cfgRow ? {valorPadrao:cfgRow.valor_padrao, tolerancia:cfgRow.tolerancia_dias} : {valorPadrao:99, tolerancia:5};
+
+  const acc = tenantRowToAccount(tenantRow, payRows||[]);
+  const ac = aAccess(acc);
+  if(!ac.ok){ loginError(ac.reason); await sb.auth.signOut(); return; }
+  await bootTenant(acc);
+}
+async function doLogout(){
+  await sb.auth.signOut();
+  sessionRole=null; currentUser=null;
+  document.getElementById('login-password').value=''; loginError('');
+  showScreen('login');
+}
+document.getElementById('login-submit').onclick=doLogin;
+['login-email','login-password'].forEach(id=>document.getElementById(id).addEventListener('keydown',e=>{ if(e.key==='Enter') doLogin(); }));
+document.getElementById('logout-btn').onclick=doLogout;
+document.getElementById('admin-logout').onclick=doLogout;
+
+/* ============================================================
+   ADMIN — assinaturas, tudo vindo do Supabase
+   ============================================================ */
+let A = { cfg:{valorPadrao:99, tolerancia:5}, accounts:[] };
+
+async function aLoadFromDb(){
+  const [{data:tRows},{data:pRows},{data:cfgRow}] = await Promise.all([
+    sb.from('tenants').select('*').order('created_at',{ascending:false}),
+    sb.from('tenant_payments').select('*'),
+    sb.from('app_config').select('*').maybeSingle()
+  ]);
+  A.cfg = cfgRow ? {valorPadrao:cfgRow.valor_padrao, tolerancia:cfgRow.tolerancia_dias} : {valorPadrao:99, tolerancia:5};
+  A.accounts = (tRows||[]).map(t=>tenantRowToAccount(t, pRows||[]));
+}
+
 function aSwitch(v){
   ['assinantes','aconfig'].forEach(x=>document.getElementById('aview-'+x).style.display=x===v?'':'none');
   document.querySelectorAll('#admin-root nav.tabs button').forEach(b=>b.classList.toggle('active',b.dataset.aview===v));
@@ -1147,6 +1252,7 @@ function aSwitch(v){
   if(v==='assinantes') renderAdmin(); else renderAConfig();
 }
 document.querySelectorAll('#admin-root nav.tabs button').forEach(b=>b.onclick=()=>aSwitch(b.dataset.aview));
+
 function payBadge(a){
   if(a.status==='cancelado') return '<span class="st cancel">—</span>';
   const f=aFinance(a);
@@ -1168,7 +1274,7 @@ function renderAdmin(){
   document.getElementById('as-mrr').textContent=fmtBRL(L.filter(a=>a.status==='ativo').reduce((s,a)=>s+Number(a.valor||0),0));
   const q=document.getElementById('a-search').value.trim().toLowerCase(); const f=document.getElementById('a-filter').value;
   const rows=L.filter(a=>{
-    if(q && !(a.empresa+' '+a.email+' '+a.nome).toLowerCase().includes(q)) return false;
+    if(q && !(a.empresa+' '+a.email+' '+(a.nome||'')).toLowerCase().includes(q)) return false;
     if(f==='late') return a.status!=='cancelado' && aFinance(a).state==='late';
     if(f) return a.status===f; return true;
   });
@@ -1180,13 +1286,20 @@ document.getElementById('a-search').oninput=renderAdmin;
 document.getElementById('a-filter').onchange=renderAdmin;
 document.getElementById('a-body').onclick=e=>{ const b=e.target.closest('[data-manage]'); if(b) openManage(b.dataset.manage); };
 
-/* modal criar/editar */
+/* chamada às Edge Functions (precisam da Service Role Key, por isso rodam no servidor) */
+async function callFn(name, body){
+  const { data, error } = await sb.functions.invoke(name, { body });
+  if(error){ return { error: error.message || String(error) }; }
+  return data;
+}
+
 function openAEdit(id){
   const a=id?A.accounts.find(x=>x.id===id):null;
   document.getElementById('ae-title').textContent=a?'Editar acesso':'Novo acesso';
   document.getElementById('ae-id').value=a?a.id:'';
-  document.getElementById('ae-empresa').value=a?a.empresa:''; document.getElementById('ae-nome').value=a?a.nome:'';
-  document.getElementById('ae-email').value=a?a.email:''; document.getElementById('ae-senha').value=a?a.senha:'';
+  document.getElementById('ae-empresa').value=a?a.empresa:''; document.getElementById('ae-nome').value=a?(a.nome||''):'';
+  document.getElementById('ae-email').value=a?a.email:''; document.getElementById('ae-senha').value='';
+  document.getElementById('ae-senha').placeholder = a ? 'deixe em branco para manter a atual' : '••••••••';
   document.getElementById('ae-valor').value=a?a.valor:A.cfg.valorPadrao;
   const ini=document.getElementById('ae-inicio'); ini.value=a?a.criado:todayStr(); ini.disabled=!!a;
   document.getElementById('ae-err').style.display='none';
@@ -1194,20 +1307,32 @@ function openAEdit(id){
 }
 document.getElementById('a-new').onclick=()=>openAEdit(null);
 document.getElementById('ae-cancel').onclick=()=>document.getElementById('a-ov-edit').classList.remove('show');
-document.getElementById('ae-save').onclick=()=>{
+document.getElementById('ae-save').onclick=async ()=>{
   const id=document.getElementById('ae-id').value; const g=x=>document.getElementById(x).value.trim();
-  const d={empresa:g('ae-empresa'),nome:g('ae-nome'),email:g('ae-email'),senha:g('ae-senha'),valor:Number(g('ae-valor'))||0};
+  const empresa=g('ae-empresa'), nome=g('ae-nome'), email=g('ae-email'), senha=g('ae-senha'), valor=Number(g('ae-valor'))||0;
   const err=m=>{ const e=document.getElementById('ae-err'); e.textContent=m; e.style.display='block'; };
-  if(!d.empresa||!d.email||!d.senha) return err('Preencha empresa, e-mail e senha.');
-  if(d.senha.length<6) return err('A senha precisa ter pelo menos 6 caracteres.');
-  const dup=A.accounts.find(x=>x.email.toLowerCase()===d.email.toLowerCase() && x.id!==id);
-  if(dup || d.email.toLowerCase()===A.admin.email.toLowerCase()) return err('Este e-mail já está em uso.');
-  if(id){ Object.assign(A.accounts.find(x=>x.id===id),d); }
-  else { const ini=g('ae-inicio')||todayStr(); A.accounts.push(Object.assign({id:'a_'+Math.random().toString(36).slice(2,9),criado:ini,anchor:ini,status:'ativo',pausedAt:null,cancelledAt:null,pagos:{},demo:false},d)); }
-  aSave(); document.getElementById('a-ov-edit').classList.remove('show'); renderAdmin();
+  if(!empresa||!email) return err('Preencha empresa e e-mail.');
+  const btn=document.getElementById('ae-save'); btn.disabled=true;
+
+  if(id){
+    // dados normais: update direto na tabela
+    const { error } = await sb.from('tenants').update({ empresa, nome_responsavel:nome||null, valor_mensal:valor }).eq('id', id);
+    if(error){ btn.disabled=false; return err(error.message); }
+    // e-mail/senha exigem a Service Role Key -> Edge Function
+    if(senha || email!==A.accounts.find(x=>x.id===id).email){
+      const r = await callFn('manage-tenant', { action:'update_credentials', tenant_id:id, email, senha:senha||undefined });
+      if(r.error){ btn.disabled=false; return err(r.error); }
+    }
+  } else {
+    if(!senha) { btn.disabled=false; return err('Defina uma senha para o novo acesso.'); }
+    const r = await callFn('create-tenant', { empresa, nome_responsavel:nome, email, senha, valor_mensal:valor, criado_em:g('ae-inicio')||todayStr() });
+    if(r.error){ btn.disabled=false; return err(r.error); }
+  }
+  btn.disabled=false;
+  await aLoadFromDb();
+  document.getElementById('a-ov-edit').classList.remove('show'); renderAdmin();
 };
 
-/* modal gerenciar */
 function openManage(id){
   const a=A.accounts.find(x=>x.id===id); if(!a) return;
   const f=aFinance(a); const el=document.getElementById('a-manage');
@@ -1228,114 +1353,75 @@ function openManage(id){
   el.innerHTML='<h3 style="margin-bottom:4px">'+escapeHtml(a.empresa)+'</h3><div class="sub" style="font-size:.8rem;opacity:.6">'+escapeHtml(a.email)+' · criado em '+fmtFull(a.criado)+'</div><div style="margin-top:10px;display:flex;gap:8px">'+accBadge(a)+payBadge(a)+'</div><div class="mgr-actions">'+btns.join('')+'</div><div style="font-weight:700;font-size:.9rem;margin-bottom:4px">Mensalidades</div>'+cyc+'<div class="modal-actions"><div></div><button class="btn ghost" data-act="close">Fechar</button></div>';
   document.getElementById('a-ov-manage').classList.add('show');
 }
-document.getElementById('a-manage').onclick=e=>{
+document.getElementById('a-manage').onclick=async e=>{
   const b=e.target.closest('[data-act]'); if(!b) return;
   const id=document.getElementById('a-manage').dataset.id; const a=A.accounts.find(x=>x.id===id); const act=b.dataset.act; const t=todayStr();
   if(act==='close'){ document.getElementById('a-ov-manage').classList.remove('show'); return; }
   if(act==='edit'){ openAEdit(id); return; }
-  if(act==='pay') a.pagos[b.dataset.n]=t;
-  else if(act==='unpay') delete a.pagos[b.dataset.n];
-  else if(act==='pause'){ a.status='pausado'; a.pausedAt=t; }
-  else if(act==='resume'){ a.anchor=addDaysIso(a.anchor,Math.max(0,daysBetweenIso(a.pausedAt,t))); a.status='ativo'; a.pausedAt=null; }
-  else if(act==='cancel'){ if(!confirm('Cancelar a assinatura de '+a.empresa+'? O acesso será bloqueado.')) return; a.status='cancelado'; a.cancelledAt=t; }
-  else if(act==='reactivate'){ a.status='ativo'; a.cancelledAt=null; a.anchor=t; }
-  else if(act==='del'){ if(!confirm('Excluir '+a.empresa+' e o acesso? Isso não pode ser desfeito.')) return; A.accounts=A.accounts.filter(x=>x.id!==id); aSave(); document.getElementById('a-ov-manage').classList.remove('show'); renderAdmin(); return; }
-  aSave(); renderAdmin(); openManage(id);
+  b.disabled = true;
+  if(act==='pay'){
+    await sb.from('tenant_payments').upsert({ tenant_id:id, ciclo:Number(b.dataset.n), vencimento:addMonthsIso(a.anchor,Number(b.dataset.n)), pago_em:t, valor:a.valor }, {onConflict:'tenant_id,ciclo'});
+  } else if(act==='unpay'){
+    await sb.from('tenant_payments').delete().eq('tenant_id',id).eq('ciclo',Number(b.dataset.n));
+  } else if(act==='pause'){
+    await sb.from('tenants').update({ status:'pausado', pausado_em:t }).eq('id',id);
+  } else if(act==='resume'){
+    const novaAncora = addDaysIso(a.anchor, Math.max(0, daysBetweenIso(a.pausedAt, t)));
+    await sb.from('tenants').update({ status:'ativo', pausado_em:null, ancora:novaAncora }).eq('id',id);
+  } else if(act==='cancel'){
+    if(!confirm('Cancelar a assinatura de '+a.empresa+'? O acesso será bloqueado.')) { b.disabled=false; return; }
+    await sb.from('tenants').update({ status:'cancelado', cancelado_em:t }).eq('id',id);
+  } else if(act==='reactivate'){
+    await sb.from('tenants').update({ status:'ativo', cancelado_em:null, ancora:t }).eq('id',id);
+  } else if(act==='del'){
+    if(!confirm('Excluir '+a.empresa+' e o acesso? Isso não pode ser desfeito.')) { b.disabled=false; return; }
+    const r = await callFn('manage-tenant', { action:'delete', tenant_id:id });
+    if(r.error){ alert(r.error); b.disabled=false; return; }
+    await aLoadFromDb();
+    document.getElementById('a-ov-manage').classList.remove('show'); renderAdmin();
+    return;
+  }
+  await aLoadFromDb();
+  renderAdmin(); openManage(id);
 };
 ['a-ov-edit','a-ov-manage'].forEach(i=>{ const o=document.getElementById(i); o.addEventListener('click',e=>{ if(e.target===o) o.classList.remove('show'); }); });
 
 /* config admin */
-function renderAConfig(){ document.getElementById('ac-valor').value=A.cfg.valorPadrao; document.getElementById('ac-tol').value=A.cfg.tolerancia; document.getElementById('ac-email').value=A.admin.email; document.getElementById('ac-pass').value=A.admin.pass; }
-document.getElementById('ac-save').onclick=()=>{
+function renderAConfig(){
+  document.getElementById('ac-valor').value=A.cfg.valorPadrao;
+  document.getElementById('ac-tol').value=A.cfg.tolerancia;
+  document.getElementById('ac-email').value= currentUser ? currentUser.email : '';
+  document.getElementById('ac-pass').value='';
+  document.getElementById('ac-pass').placeholder='deixe em branco para manter a atual';
+}
+document.getElementById('ac-save').onclick=async ()=>{
   const em=document.getElementById('ac-email').value.trim(), pw=document.getElementById('ac-pass').value;
-  if(!em||pw.length<6){ alert('Informe um e-mail e uma senha de pelo menos 6 caracteres.'); return; }
-  A.cfg.valorPadrao=Number(document.getElementById('ac-valor').value)||0; A.cfg.tolerancia=Math.max(0,Number(document.getElementById('ac-tol').value)||0);
-  A.admin.email=em; A.admin.pass=pw; aSave();
+  if(pw && pw.length<6){ alert('A senha precisa ter pelo menos 6 caracteres.'); return; }
+  await sb.from('app_config').update({
+    valor_padrao: Number(document.getElementById('ac-valor').value)||0,
+    tolerancia_dias: Math.max(0, Number(document.getElementById('ac-tol').value)||0)
+  }).eq('id', true);
+  const patch = {};
+  if(em && em!==currentUser.email) patch.email = em;
+  if(pw) patch.password = pw;
+  if(Object.keys(patch).length){
+    const { error } = await sb.auth.updateUser(patch);
+    if(error){ alert('Configurações de mensalidade salvas, mas houve um erro ao atualizar seu login: '+error.message); }
+  }
+  await aLoadFromDb();
   const m=document.getElementById('ac-saved'); m.classList.add('show'); setTimeout(()=>m.classList.remove('show'),2200);
 };
 
-function updateDisparoBadge(){
-  const due = dueForDisparo();
-  const pendentes = due.filter(c=> sentToday[c.id]!==todayStr());
-  const badge = document.getElementById('disparo-badge');
-  if(pendentes.length){ badge.textContent = pendentes.length; badge.style.display=''; }
-  else { badge.style.display='none'; }
-}
-
-document.querySelectorAll('#app-root nav.tabs button').forEach(b=>{
-  b.onclick = ()=> switchView(b.dataset.view);
-});
-
-document.getElementById('search').oninput = renderList;
-document.getElementById('filter-status').onchange = ()=>{ pendingFilter=null; renderList(); };
-
-/* ---------- MODAL ---------- */
-const overlay = document.getElementById('overlay');
-function openModal(client){
-  document.getElementById('modal-title').textContent = client ? 'Editar cliente' : 'Novo cliente';
-  document.getElementById('f-id').value = client ? client.id : '';
-  document.getElementById('f-nome').value = client ? client.nome : '';
-  document.getElementById('f-telefone').value = client ? client.telefone : '';
-  document.getElementById('f-empresa').value = client ? client.empresa : '';
-  document.getElementById('f-valor').value = client ? client.valor : '';
-  document.getElementById('f-origem').value = client ? client.origem : '';
-  document.getElementById('f-situacao').value = client ? client.situacao : 'novo';
-  document.getElementById('f-prox-data').value = client ? client.proxData : '';
-  document.getElementById('f-prox-motivo').value = client ? client.proxMotivo : '';
-  document.getElementById('btn-delete').style.display = client ? '' : 'none';
-  overlay.classList.add('show');
-}
-function closeModal(){ overlay.classList.remove('show'); }
-
-document.getElementById('btn-new').onclick = ()=> openModal(null);
-document.getElementById('btn-cancel').onclick = closeModal;
-overlay.onclick = (e)=>{ if(e.target===overlay) closeModal(); };
-
-document.getElementById('btn-save').onclick = ()=>{
-  const id = document.getElementById('f-id').value;
-  const nome = document.getElementById('f-nome').value.trim();
-  if(!nome){ alert('Informe o nome do cliente.'); return; }
-  let data = {
-    nome,
-    telefone: document.getElementById('f-telefone').value.trim(),
-    empresa: document.getElementById('f-empresa').value.trim(),
-    valor: Number(document.getElementById('f-valor').value)||0,
-    origem: document.getElementById('f-origem').value.trim(),
-    situacao: document.getElementById('f-situacao').value,
-    proxData: document.getElementById('f-prox-data').value,
-    proxMotivo: document.getElementById('f-prox-motivo').value.trim(),
-  };
-  if(id){
-    const idx = clients.findIndex(c=>c.id===id);
-    if(idx>-1){
-      const previous = clients[idx];
-      data = applyAutoRetorno({...previous, ...data}, previous);
-      clients[idx] = {...previous, ...data};
-    }
-  } else {
-    data = applyAutoRetorno({...data}, null);
-    clients.push({id:cid(), retornoStage:0, ...data});
-  }
-  save();
-  closeModal();
-  renderDash();
-  renderList();
-};
-
-document.getElementById('btn-delete').onclick = ()=>{
-  const id = document.getElementById('f-id').value;
-  if(id && confirm('Excluir este cliente?')){
-    clients = clients.filter(c=>c.id!==id);
-    save();
-    closeModal();
-    renderDash();
-    renderList();
-  }
-};
-
-/* ---------- INIT ---------- */
-bootFromSession();
-setInterval(()=>{ if(sessionRole==='tenant'){ checkBanner(); updateDisparoBadge(); } }, 30000);
+/* ============================================================
+   INIT — retoma a sessão do Supabase, se houver
+   ============================================================ */
+(async function init(){
+  const { data:{ session } } = await sb.auth.getSession();
+  if(session && session.user){ await resolveSession(session.user); }
+  else { showScreen('login'); }
+  setInterval(()=>{ if(sessionRole==='tenant'){ checkBanner(); updateDisparoBadge(); } }, 30000);
+})();
 </script>
+
 </body>
 </html>
