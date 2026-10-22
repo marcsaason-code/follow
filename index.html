@@ -615,8 +615,8 @@ footer.tab-info{text-align:center; font-size:0.75rem; opacity:0.4; padding:20px 
   <div class="field-row"><div class="field"><label>Empresa</label><input type="text" id="ae-empresa"></div><div class="field"><label>Responsável</label><input type="text" id="ae-nome"></div></div>
   <div class="field-row"><div class="field"><label>E-mail de acesso</label><input type="email" id="ae-email"></div><div class="field"><label>Senha</label><input type="text" id="ae-senha"></div></div>
   <div class="field-row"><div class="field"><label>Mensalidade (R$)</label><input type="number" id="ae-valor" min="0" step="0.01"></div><div class="field"><label>Data de criação (base dos vencimentos)</label><input type="date" id="ae-inicio"></div></div>
-  <div class="field"><label>Tipo de acesso</label><select id="ae-tipo"><option value="pago">Assinatura mensal</option><option value="teste">Teste 30 dias</option></select></div>
-  <div class="note" id="ae-tipo-note" style="display:none; margin:-6px 0 12px;">O acesso funciona por 30 dias a partir da data de criação. Depois disso o cliente consegue entrar, mas o sistema fica bloqueado até você ativar a assinatura.</div>
+  <div class="field"><label>Tipo de acesso</label><select id="ae-tipo"><option value="pago">Assinatura mensal</option><option value="teste">Teste 7 dias</option></select></div>
+  <div class="note" id="ae-tipo-note" style="display:none; margin:-6px 0 12px;">O acesso funciona por 7 dias a partir da data de criação. Depois disso o cliente consegue entrar, mas o sistema fica bloqueado até você ativar a assinatura.</div>
   <div class="login-error" id="ae-err" style="display:none; text-align:left;"></div>
   <div class="modal-actions"><div></div><div style="display:flex; gap:8px;"><button class="btn ghost" id="ae-cancel">Cancelar</button><button class="btn" id="ae-save">Salvar</button></div></div>
 </div></div>
@@ -1205,7 +1205,7 @@ function daysBetweenIso(a,b){ const x=a.split('-').map(Number), y=b.split('-').m
 function fmtFull(s){ if(!s) return '—'; const p=s.split('-'); return p[2]+'/'+p[1]+'/'+p[0]; }
 function fmtBRL(v){ return 'R$ '+Number(v||0).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2}); }
 
-const TRIAL_DAYS = 30; // duração do período de teste (dias)
+const TRIAL_DAYS = 7; // duração do período de teste (dias)
 function trialInfo(a){
   if(!a || a.plano!=='teste') return null;
   const dias=a.testeDias||TRIAL_DAYS;
@@ -1442,7 +1442,20 @@ document.getElementById('a-body').onclick=e=>{ const b=e.target.closest('[data-m
 /* chamada às Edge Functions (precisam da Service Role Key, por isso rodam no servidor) */
 async function callFn(name, body){
   const { data, error } = await sb.functions.invoke(name, { body });
-  if(error){ return { error: error.message || String(error) }; }
+  if(error){
+    let msg = error.message || String(error);
+    try{
+      // quando a função responde com erro, a mensagem real vem no corpo da resposta
+      if(error.context && typeof error.context.json==='function'){
+        const j = await error.context.json();
+        if(j && j.error) msg = j.error;
+      }
+    }catch(e){}
+    if(/already (been )?registered|already exists|duplicate key/i.test(msg)) msg='Este e-mail já tem um login cadastrado. Use outro e-mail (ou apague o usuário antigo em Authentication > Users no Supabase).';
+    else if(/at least 6/i.test(msg)) msg='A senha precisa ter pelo menos 6 caracteres.';
+    else if(/Apenas o administrador|Não autenticado/i.test(msg)) msg=msg+' Saia e entre novamente no painel.';
+    return { error: msg };
+  }
   return data;
 }
 
